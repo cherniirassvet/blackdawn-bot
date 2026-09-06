@@ -254,6 +254,21 @@ async function handleDonation(env, d) {
 async function pollDonations(env) {
   const j = await daGet(env, '/api/v1/alerts/donations');
   const list = (j.data || []).slice().reverse();
+
+  /* Первый запуск. Всё, что пришло до подключения бота, помечаем
+     обработанным и ничего по нему не выдаём: иначе бот раздал бы
+     привилегии по всей старой истории донатов. */
+  const seeded = await env.STATE.get('seeded');
+  if (!seeded) {
+    const ids = list.map((d) => d.id).filter((x) => x !== null && x !== undefined);
+    await putJson(env, 'done', ids.slice(-300));
+    await env.STATE.put('seeded', String(Date.now()));
+    await say(env, adminChat(env),
+      `🟢 Бот подключён и слушает донаты.\nВ истории было ${ids.length} — они помечены как старые, ` +
+      `выдаваться по ним ничего не будет. Новые обрабатываю сразу.`);
+    return;
+  }
+
   for (const d of list) await handleDonation(env, d);
 }
 
