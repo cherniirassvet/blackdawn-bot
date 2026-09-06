@@ -277,6 +277,17 @@ async function pollDonations(env) {
    это бесплатно, в отличие от записи в KV. */
 const seenUpdates = new Set();
 
+/* Своё имя нужно, чтобы в общем чате не хватать /online@ЧужойБот.
+   Спрашиваем один раз на воркер и запоминаем. */
+let botUser = null;
+
+async function myUsername(env) {
+  if (botUser !== null) return botUser;
+  const j = await tg(env, 'getMe', {});
+  botUser = String(((j || {}).result || {}).username || '').toLowerCase();
+  return botUser;
+}
+
 function firstTime(id) {
   if (id === undefined || id === null) return true;
   if (seenUpdates.has(id)) return false;
@@ -492,9 +503,21 @@ async function onMessage(env, m) {
   const from = m.from || {};
   if (!chat || !text) return;
 
-  const cmd = text.split(/\s+/)[0].split('@')[0].toLowerCase();
+  /* Личка или общий чат - от этого зависит, что бот вообще слушает. */
+  const priv = !m.chat || m.chat.type === 'private';
+
+  const head = text.split(/\s+/)[0];
+  const cmd = head.split('@')[0].toLowerCase();
+  const at = head.includes('@') ? head.split('@')[1].toLowerCase() : '';
   const args = text.split(/\s+/).slice(1);
   const adm = isAdmin(env, from.id);
+
+  /* В общем чате бот молчит на всё, кроме своих команд: пересказывать
+     администрации каждое сообщение из чата - не дело. */
+  if (!priv) {
+    if (cmd[0] !== '/') return;
+    if (at && at !== (await myUsername(env))) return;
+  }
 
   if (cmd === '/start' || cmd === '/help') return say(env, chat, HELP_USER + (adm ? HELP_ADMIN : ''));
   if (cmd === '/ip') {
@@ -517,7 +540,12 @@ async function onMessage(env, m) {
     }
   }
 
-  // всё остальное — жалоба
+  // всё остальное — жалоба, и только из личной переписки
+  if (!priv) return;
+
+  /* Пересылать администратору его же сообщение незачем. */
+  if (adm) return say(env, chat, 'Не понял команду. Список — /help.');
+
   const who = [from.first_name, from.last_name].filter(Boolean).join(' ') || 'без имени';
   const tag = from.username ? '@' + from.username : 'без ника';
   await say(env, adminChat(env),
