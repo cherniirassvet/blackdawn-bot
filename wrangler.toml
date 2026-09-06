@@ -1,0 +1,43 @@
+# Настройки воркера. Секреты сюда НЕ пишутся — они задаются отдельно,
+# командой `wrangler secret put ИМЯ` или в панели Cloudflare.
+
+name = "blackdawn-bot"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+# Крон: раз в минуту забираем новые донаты.
+[triggers]
+crons = ["* * * * *"]
+
+# Хранилище. id подставится, когда создашь namespace:
+#   wrangler kv namespace create STATE
+[[kv_namespaces]]
+binding = "STATE"
+id = "СЮДА_ID_NAMESPACE"
+
+[vars]
+# Игровой сервер
+SERVER_IP    = "195.60.166.224"
+SERVER_PORT  = "27374"
+
+# Панель хостинга — через неё бот отдаёт команды серверу
+PANEL_URL    = "https://bropanel.gamehostbros.com"
+PANEL_SERVER = "c06af452"
+
+# Откуда бот берёт онлайн и топ (эти файлы обновляет робот сайта)
+ONLINE_URL = "https://cherniirassvet.github.io/data/online.json"
+TOP_URL    = "https://cherniirassvet.github.io/data/top.json"
+
+# Кто администратор. Telegram ID числом, несколько — через запятую.
+TG_ADMINS = "СЮДА_ТВОЙ_ID"
+
+# Прайс: тип|дней|цена|валюта. Дней 0 = навсегда, цена 0 = сумму не сверять.
+PRICE_VIP_MONTH     = "vip|30|30|EUR"
+PRICE_VIP_FOREVER   = "vip|0|90|EUR"
+PRICE_ADMIN_MONTH   = "admin|30|60|EUR"
+PRICE_ADMIN_FOREVER = "admin|0|150|EUR"
+
+# Слова, по которым бот понимает заказ
+WORDS_VIP     = "вип,vip"
+WORDS_ADMIN   = "админ,admin"
+WORDS_FOREVER = "навсегда,forever,перман"
