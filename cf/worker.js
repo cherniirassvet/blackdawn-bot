@@ -272,6 +272,19 @@ async function pollDonations(env) {
   for (const d of list) await handleDonation(env, d);
 }
 
+/* Телеграм иногда доставляет одно и то же обновление дважды - тогда бот
+   отвечает два раза подряд. Помним номера последних в памяти воркера:
+   это бесплатно, в отличие от записи в KV. */
+const seenUpdates = new Set();
+
+function firstTime(id) {
+  if (id === undefined || id === null) return true;
+  if (seenUpdates.has(id)) return false;
+  seenUpdates.add(id);
+  if (seenUpdates.size > 500) seenUpdates.delete(seenUpdates.values().next().value);
+  return true;
+}
+
 /* ---------------------------------------------------------------- Telegram */
 
 const HELP_USER =
@@ -524,7 +537,9 @@ export default {
         return new Response('no', { status: 403 });
       }
       const upd = await request.json().catch(() => ({}));
-      if (upd.message) ctx.waitUntil(onMessage(env, upd.message).catch(() => {}));
+      if (upd.message && firstTime(upd.update_id)) {
+        ctx.waitUntil(onMessage(env, upd.message).catch(() => {}));
+      }
       return new Response('ok');
     }
 
