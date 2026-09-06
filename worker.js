@@ -278,6 +278,7 @@ const HELP_USER =
   '<b>Чёрный Рассвет</b>\n\n' +
   '/online — кто сейчас на сервере\n' +
   '/top — пятнадцать первых по убийствам\n' +
+  '/clans — топ кланов\n' +
   '/rank ник — место игрока\n' +
   '/ip — адрес сервера\n\n' +
   'Жалоба или спорный бан — напиши сюда текстом: свой ник, ник нарушителя, ' +
@@ -292,6 +293,27 @@ const HELP_ADMIN =
   '/cmd команда — выполнить команду на сервере';
 
 const fmt = (n) => (n === null || n === undefined || isNaN(n) ? '—' : Math.round(n).toLocaleString('ru-RU'));
+
+/* «1 фраг, 2 фрага, 5 фрагов» — иначе список читается коряво. */
+function plural(n, one, few, many) {
+  const a = Math.abs(Math.round(n)) % 100;
+  if (a > 10 && a < 20) return many;
+  const b = a % 10;
+  if (b === 1) return one;
+  if (b >= 2 && b <= 4) return few;
+  return many;
+}
+
+/* Время сводки в часовом поясе сервера. Пояс меняется переменной TZ. */
+function clock(ts, env) {
+  if (!ts) return '—';
+  try {
+    return new Date(ts * 1000).toLocaleTimeString('ru-RU',
+      { timeZone: (env && env.TZ) || 'Europe/Moscow', hour12: false });
+  } catch (e) {
+    return new Date(ts * 1000).toISOString().slice(11, 19);
+  }
+}
 
 async function siteJson(url) {
   try {
@@ -313,12 +335,49 @@ function ago(ts) {
 async function cmdOnline(env, chat) {
   const j = await siteJson(env.ONLINE_URL);
   if (!j) return say(env, chat, 'Не получилось прочитать сводку по серверу.');
-  if (j.online === false) return say(env, chat, 'Сервер не отвечает.');
-  const names = (j.list || []).map((p) => esc(p.name)).join(', ');
-  return say(env, chat,
-    `<b>На сервере ${j.players} из ${j.max}</b>\nКарта: <code>${esc(j.map)}</code>\n` +
-    (names ? `\n${names}\n` : '') +
-    `\n<i>сводка ${ago(j.updated)}</i>`);
+  if (j.online === false) return say(env, chat, '🔴 Сервер не отвечает.');
+
+  const addr = `${env.SERVER_IP}:${env.SERVER_PORT}`;
+  const max = j.max || 32;
+  const pct = max ? Math.round((j.players / max) * 100) : 0;
+
+  const list = (j.list || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
+  const rows = list.map((p, i) => {
+    const s = Number(p.score) || 0;
+    return `${i + 1}. ${esc(p.name)} • ${fmt(s)} ${plural(s, 'фраг', 'фрага', 'фрагов')}`;
+  });
+
+  const out = [
+    '👥 <b>Реальный онлайн</b>',
+    '',
+    `🌐 Адрес: <code>${addr}</code>`,
+    `🗺️ Карта: <code>${esc(j.map) || '—'}</code>`,
+    `👤 Онлайн: <b>${j.players}/${max}</b> (${pct}%)`,
+  ];
+  if (rows.length) out.push('', '👤 <b>Игроки:</b>', rows.join('\n'));
+  out.push('', `🕒 Обновлено: ${clock(j.updated, env)}`);
+
+  return say(env, chat, out.join('\n'));
+}
+
+async function cmdClans(env, chat) {
+  const j = await siteJson(env.TOP_URL);
+  const cl = ((j && j.clans) || []).slice()
+    .sort((a, b) => (b.exp - a.exp) || (b.level - a.level));
+  if (!cl.length) return say(env, chat, 'Кланов пока нет. Создать можно в игре: меню на клавише M.');
+
+  const rows = cl.slice(0, 15).map((c, i) => {
+    const tag = c.tag ? ` [${esc(c.tag)}]` : '';
+    return `${i + 1}. ${esc(c.name)}${tag} • ${fmt(c.exp)} опыта • ${fmt(c.level)} ур.`;
+  });
+
+  return say(env, chat, [
+    '🛡 <b>Топ кланов</b>',
+    '',
+    rows.join('\n'),
+    '',
+    `🕒 Обновлено: ${clock(j.updated, env)}`,
+  ].join('\n'));
 }
 
 async function cmdTop(env, chat) {
@@ -396,6 +455,7 @@ async function onMessage(env, m) {
   }
   if (cmd === '/online') return cmdOnline(env, chat);
   if (cmd === '/top') return cmdTop(env, chat);
+  if (cmd === '/clans' || cmd === '/clan') return cmdClans(env, chat);
   if (cmd === '/rank') return cmdRank(env, chat, args.join(' '));
 
   if (adm) {
