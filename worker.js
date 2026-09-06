@@ -418,6 +418,39 @@ export default {
       return new Response('ok');
     }
 
+    // Служебные страницы. Ключ SETUP_KEY защищает их от посторонних.
+    if (url.pathname === '/setup/status') {
+      if (url.searchParams.get('key') !== env.SETUP_KEY) return new Response('no', { status: 403 });
+      const have = (v) => (v ? 'есть' : 'НЕТ');
+      const t = await daTokens(env);
+      const lines = [
+        'TG_TOKEN: ' + have(env.TG_TOKEN),
+        'PANEL_KEY: ' + have(env.PANEL_KEY),
+        'DA_CLIENT_ID: ' + have(env.DA_CLIENT_ID),
+        'DA_CLIENT_SECRET: ' + have(env.DA_CLIENT_SECRET),
+        'TG_ADMINS: ' + (env.TG_ADMINS || 'НЕТ'),
+        'DonationAlerts привязан: ' + have(t),
+        'KV STATE: ' + have(env.STATE),
+        '',
+        'Вебхук телеграма: ' + url.origin + '/tg',
+        'Привязать донаты: ' + url.origin + '/da/login?key=…',
+      ];
+      return new Response(lines.join('\n'), { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+    }
+
+    // Подключить вебхук телеграма, не светя токен в адресной строке.
+    if (url.pathname === '/setup/webhook') {
+      if (url.searchParams.get('key') !== env.SETUP_KEY) return new Response('no', { status: 403 });
+      const j = await tg(env, 'setWebhook', {
+        url: `${url.origin}/tg`,
+        secret_token: env.TG_WEBHOOK_SECRET,
+        allowed_updates: ['message'],
+      });
+      return new Response(JSON.stringify(j, null, 1), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      });
+    }
+
     // Привязка DonationAlerts. Ссылку открываешь один раз, в браузере.
     if (url.pathname === '/da/login') {
       if (url.searchParams.get('key') !== env.SETUP_KEY) return new Response('no', { status: 403 });
