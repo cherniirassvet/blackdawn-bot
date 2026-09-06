@@ -1,0 +1,17 @@
+[Unit]
+Description=Chernii Rassvet - Telegram bot i vydacha privilegiy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bot
+ExecStart=/home/ubuntu/bot/venv/bin/python3 /home/ubuntu/bot/bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
