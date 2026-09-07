@@ -501,22 +501,46 @@ function parseCsstats(u8) {
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
-/* Поиск SteamID по нику для страницы заказа. Отдаём только по конкретному
-   запросу от трёх букв и не больше пяти совпадений: выкачать себе весь
-   список игроков через это нельзя. Сам SteamID и так виден любому, кто
+/* Поиск SteamID по нику для страницы заказа.
+
+   В csstats.dat SteamID нет: сервер настроен считать статистику по нику
+   (csstats_rank 0), и во втором поле там лежит тот же ник. Поэтому ищем
+   среди тех, кто сейчас на сервере (файл пишет плагин) и среди участников
+   кланов - там SteamID есть.
+
+   Отдаём только по запросу от трёх букв и не больше пяти совпадений:
+   выкачать через это весь список нельзя. Сам SteamID видит любой, кто
    напишет на сервере status, - секретом он не является. */
+const STEAM_RE_STRICT = /^STEAM_[0-5]:[01]:\d+$/i;
+
 async function whois(env, nick) {
   const q = String(nick || '').trim().toLowerCase();
   if (q.length < 3) return { error: 'коротко', matches: [] };
-  const t = await liveTop(env);
+
+  const pool = [];
+
+  const on = await liveOnline(env);
+  for (const p of (on && on.list) || []) {
+    if (p.bot) continue;
+    pool.push({ name: p.name, steam: p.steam, where: 'сейчас в игре' });
+  }
+
+  const mem = await panelBytes(env, SRV + 'zm_clan_members.ini');
+  if (mem) {
+    for (const line of iniRows(decodeBytes(mem))) {
+      const t = tokens(line);
+      if (t.length >= 2) pool.push({ name: t[1], steam: t[0], where: 'в клане' });
+    }
+  }
+
   const seen = new Set();
   const out = [];
-  for (const p of (t && t.players) || []) {
-    const st = String(p.steam || '');
-    if (!/^STEAM_[0-5]:[01]:\d+$/i.test(st) || seen.has(st)) continue;
+  for (const p of pool) {
+    const st = String(p.steam || '').toUpperCase();
+    if (!STEAM_RE_STRICT.test(st) || seen.has(st)) continue;
     if (!String(p.name || '').toLowerCase().includes(q)) continue;
     seen.add(st);
-    out.push({ name: p.name, steam: st.toUpperCase(), kills: p.kills || 0 });
+    out.push({ name: p.name, steam: st, where: p.where });
     if (out.length >= 5) break;
   }
   return { matches: out };
@@ -772,7 +796,11 @@ export default {
 
       let body;
       if (url.pathname === '/api/online') {
-        body = (await liveOnline(env)) || { online: false, players: 0, list: [] };
+        const o = (await liveOnline(env)) || { online: false, players: 0, list: [] };
+        /* SteamID из общего списка убираем - он нужен только точечному
+           поиску по нику, а не всем подряд. */
+        body = { ...o, list: ((o.list) || []).map(
+          ({ name, score, bot }) => ({ name, score, bot })) };
       } else {
         const [t, c] = await Promise.all([liveTop(env), liveClans(env)]);
         /* В открытом топе SteamID не отдаём - там он не нужен, а списком
