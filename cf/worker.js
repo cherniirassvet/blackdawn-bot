@@ -474,10 +474,10 @@ function csstatsFrom(u8, dv, off) {
     if (i + 2 > n) break;
     const ls = dv.getInt16(i, true); i += 2;
     if (ls < 0 || ls > 128 || i + ls > n) break;
-    str(ls);
+    const steam = str(ls);
     if (i + 80 > n) break;
     const v = (j) => dv.getInt32(i + j * 4, true);
-    const row = { name, damage: Math.max(0, v(1)), deaths: Math.max(0, v(2)),
+    const row = { name, steam, damage: Math.max(0, v(1)), deaths: Math.max(0, v(2)),
                   kills: Math.max(0, v(3)), hs: Math.max(0, v(6)) };
     i += 80;
     if (name) out.push(row);
@@ -500,6 +500,27 @@ function parseCsstats(u8) {
 }
 
 const nowSec = () => Math.floor(Date.now() / 1000);
+
+/* Поиск SteamID по нику для страницы заказа. Отдаём только по конкретному
+   запросу от трёх букв и не больше пяти совпадений: выкачать себе весь
+   список игроков через это нельзя. Сам SteamID и так виден любому, кто
+   напишет на сервере status, - секретом он не является. */
+async function whois(env, nick) {
+  const q = String(nick || '').trim().toLowerCase();
+  if (q.length < 3) return { error: 'коротко', matches: [] };
+  const t = await liveTop(env);
+  const seen = new Set();
+  const out = [];
+  for (const p of (t && t.players) || []) {
+    const st = String(p.steam || '');
+    if (!/^STEAM_[0-5]:[01]:\d+$/i.test(st) || seen.has(st)) continue;
+    if (!String(p.name || '').toLowerCase().includes(q)) continue;
+    seen.add(st);
+    out.push({ name: p.name, steam: st.toUpperCase(), kills: p.kills || 0 });
+    if (out.length >= 5) break;
+  }
+  return { matches: out };
+}
 
 async function liveOnline(env) {
   const u8 = await panelBytes(env, SRV + 'zm_online.json');
@@ -721,6 +742,29 @@ export default {
     /* Открытые сводки для сайта. Секретов тут нет - те же цифры, что
        бот показывает в телеграме, только сразу с сервера. Ответ кладём
        в кэш на 15 секунд, чтобы не дёргать панель на каждого гостя. */
+    /* Браузер спрашивает разрешение перед POST - отвечаем на это заранее. */
+    if (request.method === 'OPTIONS' && url.pathname.startsWith('/api/')) {
+      return new Response(null, { status: 204, headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Max-Age': '86400',
+      }});
+    }
+
+    /* Ник приходит телом запроса, а не в адресе: в адресную строку и логи
+       чужие ники попадать не должны. Ответ не кэшируем. */
+    if (url.pathname === '/api/whois' && request.method === 'POST') {
+      let nick = '';
+      try { nick = (await request.json()).nick || ''; } catch (e) { /* пусто */ }
+      const r = await whois(env, nick);
+      return new Response(JSON.stringify(r), { headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store',
+      }});
+    }
+
     if (url.pathname === '/api/online' || url.pathname === '/api/top') {
       const cache = caches.default;
       const hit = await cache.match(request);
@@ -731,7 +775,11 @@ export default {
         body = (await liveOnline(env)) || { online: false, players: 0, list: [] };
       } else {
         const [t, c] = await Promise.all([liveTop(env), liveClans(env)]);
-        body = { players: (t && t.players) || [], clans: (c && c.clans) || [],
+        /* В открытом топе SteamID не отдаём - там он не нужен, а списком
+           выкачивать его никому не следует. */
+        const players = ((t && t.players) || []).map(
+          ({ name, kills, damage, hs, deaths }) => ({ name, kills, damage, hs, deaths }));
+        body = { players, clans: (c && c.clans) || [],
                  updated: (t && t.updated) || nowSec() };
       }
       const res = new Response(JSON.stringify(body), {
