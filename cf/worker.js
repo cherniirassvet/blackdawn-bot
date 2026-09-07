@@ -374,8 +374,167 @@ function ago(ts) {
   return `${Math.floor(m / 60)} ч назад`;
 }
 
+/* ------------------------------------------- живые данные с сервера
+
+   Файлы игрового сервера бот читает через панель прямо в момент запроса.
+   Раньше цифры шли с сайта, а их робот обновляет раз в 15 минут - отсюда
+   и брались устаревшие ответы. Если панель молчит, откатываемся на файлы
+   сайта, чтобы бот не остался вовсе без данных. */
+
+const SRV = '/cstrike/addons/amxmodx/data/';
+
+/* Верхняя половина CP1251: старые ники приходят в ней, а не в UTF-8. */
+const CP1251_HI = 'ЂЃ‚ѓ„…†‡€‰Љ‹ЊЌЋЏђ‘’“”•–—�™љ›њќћџ ЎўЈ¤Ґ¦§Ё©Є«¬­®Ї°±Ііґµ¶·ё№є»јЅѕїАБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюя';
+
+function decodeBytes(u8) {
+  if (!u8) return '';
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(u8);
+  } catch (e) {
+    let out = '';
+    for (let i = 0; i < u8.length; i++) {
+      const b = u8[i];
+      out += b < 0x80 ? String.fromCharCode(b) : CP1251_HI[b - 0x80];
+    }
+    return out;
+  }
+}
+
+async function panelBytes(env, path) {
+  try {
+    const url = `${env.PANEL_URL}/api/client/servers/${env.PANEL_SERVER}`
+      + `/files/contents?file=${encodeURIComponent(path)}`;
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${env.PANEL_KEY}`, Accept: 'application/json' } });
+    if (!r.ok) return null;
+    return new Uint8Array(await r.arrayBuffer());
+  } catch (e) {
+    return null;
+  }
+}
+
+/* Значения в ini бывают в кавычках, а название клана - с пробелами. */
+const tokens = (line) => (line.match(/"[^"]*"|\S+/g) || []).map((t) => t.replace(/^"|"$/g, ''));
+
+const iniRows = (text) => String(text || '').split('\n')
+  .map((l) => l.trim())
+  .filter((l) => l && !';#[/'.includes(l[0]));
+
+/* Строка: название тег уровень опыт монеты банк слоты STEAM_лидера победы поражения ...
+   Опираемся на SteamID: от него пять чисел назад, перед ними тег. */
+function parseClansIni(text) {
+  const out = [];
+  for (const line of iniRows(text)) {
+    const t = tokens(line);
+    const k = t.findIndex((v) => /^STEAM_/i.test(v));
+    if (k < 6) continue;
+    const num = (i) => { const v = parseInt(t[i], 10); return Number.isFinite(v) ? v : 0; };
+    out.push({
+      idx: out.length,
+      name: t.slice(0, k - 6).join(' ').trim() || t[k - 6],
+      tag: t[k - 6],
+      level: num(k - 5), exp: num(k - 4), slots: num(k - 1),
+      wins: num(k + 1), losses: num(k + 2),
+      members: 0, leader: '',
+    });
+  }
+  return out;
+}
+
+/* Строка: STEAM_игрока ник клан ранг ... Ранг 2 - глава. */
+function fillRoster(clans, text) {
+  for (const line of iniRows(text)) {
+    const t = tokens(line);
+    if (t.length < 4) continue;
+    const c = clans[parseInt(t[2], 10)];
+    if (!c) continue;
+    c.members++;
+    if (parseInt(t[3], 10) >= 2 && t[1]) c.leader = t[1];
+  }
+  return clans;
+}
+
+/* csstats.dat: по игроку - ник, SteamID и двадцать чисел.
+   Начальное смещение у разных сборок AMXX разное, поэтому пробуем
+   несколько и берём тот разбор, что дочитал файл до конца. */
+function csstatsFrom(u8, dv, off) {
+  const n = u8.length;
+  let i = off;
+  const out = [];
+  const str = (len) => {
+    let end = i;
+    while (end < i + len && u8[end] !== 0) end++;
+    const s = decodeBytes(u8.subarray(i, end)).trim();
+    i += len;
+    return s;
+  };
+  while (i + 2 <= n) {
+    const ln = dv.getInt16(i, true); i += 2;
+    if (ln <= 0 || ln > 128 || i + ln > n) break;
+    const name = str(ln);
+    if (i + 2 > n) break;
+    const ls = dv.getInt16(i, true); i += 2;
+    if (ls < 0 || ls > 128 || i + ls > n) break;
+    str(ls);
+    if (i + 80 > n) break;
+    const v = (j) => dv.getInt32(i + j * 4, true);
+    const row = { name, damage: Math.max(0, v(1)), deaths: Math.max(0, v(2)),
+                  kills: Math.max(0, v(3)), hs: Math.max(0, v(6)) };
+    i += 80;
+    if (name) out.push(row);
+  }
+  return { rows: out, used: i };
+}
+
+function parseCsstats(u8) {
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let best = [], bestScore = -1;
+  for (const off of [2, 6, 4, 0, 8]) {
+    let r;
+    try { r = csstatsFrom(u8, dv, off); } catch (e) { continue; }
+    if (!r.rows.length) continue;
+    const tail = u8.length - r.used;
+    const score = r.rows.length * 1000 - tail;
+    if (tail <= 8 && score > bestScore) { best = r.rows; bestScore = score; }
+  }
+  return best;
+}
+
+const nowSec = () => Math.floor(Date.now() / 1000);
+
+async function liveOnline(env) {
+  const u8 = await panelBytes(env, SRV + 'zm_online.json');
+  if (u8 && u8.length) {
+    try {
+      const j = JSON.parse(decodeBytes(u8));
+      if (j && Array.isArray(j.list)) return j;
+    } catch (e) { /* файла ещё нет или он пишется - берём запасной */ }
+  }
+  return siteJson(env.ONLINE_URL);
+}
+
+async function liveClans(env) {
+  const c = await panelBytes(env, SRV + 'zm_clans.ini');
+  if (!c) {
+    const j = await siteJson(env.TOP_URL);
+    return j ? { clans: j.clans || [], updated: j.updated } : null;
+  }
+  const clans = parseClansIni(decodeBytes(c));
+  const m = await panelBytes(env, SRV + 'zm_clan_members.ini');
+  if (m) fillRoster(clans, decodeBytes(m));
+  return { clans, updated: nowSec() };
+}
+
+async function liveTop(env) {
+  const u8 = await panelBytes(env, SRV + 'csstats.dat');
+  if (!u8) {
+    const j = await siteJson(env.TOP_URL);
+    return j ? { players: j.players || [], updated: j.updated } : null;
+  }
+  return { players: parseCsstats(u8), updated: nowSec() };
+}
+
 async function cmdOnline(env, chat) {
-  const j = await siteJson(env.ONLINE_URL);
+  const j = await liveOnline(env);
   if (!j) return say(env, chat, 'Не получилось прочитать сводку по серверу.');
   if (j.online === false) return say(env, chat, '🔴 Сервер не отвечает.');
 
@@ -403,7 +562,7 @@ async function cmdOnline(env, chat) {
 }
 
 async function cmdClans(env, chat) {
-  const j = await siteJson(env.TOP_URL);
+  const j = await liveClans(env);
   const cl = ((j && j.clans) || []).slice()
     .sort((a, b) => (b.exp - a.exp) || (b.level - a.level));
   if (!cl.length) return say(env, chat, 'Кланов пока нет. Создать можно в игре: меню на клавише M.');
@@ -433,7 +592,7 @@ async function cmdClans(env, chat) {
 }
 
 async function cmdTop(env, chat) {
-  const j = await siteJson(env.TOP_URL);
+  const j = await liveTop(env);
   const pl = ((j && j.players) || []).slice();
   if (!pl.length) return say(env, chat, 'Топ пока пуст.');
   pl.sort((a, b) => (b.kills - a.kills) || (b.damage - a.damage));
@@ -452,7 +611,7 @@ async function cmdTop(env, chat) {
 
 async function cmdRank(env, chat, nick) {
   if (!nick) return say(env, chat, 'Напиши ник: <code>/rank Вася</code>');
-  const j = await siteJson(env.TOP_URL);
+  const j = await liveTop(env);
   const pl = (j && j.players) || [];
   if (!pl.length) return say(env, chat, 'Статистика недоступна.');
   pl.sort((a, b) => (b.kills - a.kills) || (b.damage - a.damage));
@@ -558,6 +717,33 @@ async function onMessage(env, m) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    /* Открытые сводки для сайта. Секретов тут нет - те же цифры, что
+       бот показывает в телеграме, только сразу с сервера. Ответ кладём
+       в кэш на 15 секунд, чтобы не дёргать панель на каждого гостя. */
+    if (url.pathname === '/api/online' || url.pathname === '/api/top') {
+      const cache = caches.default;
+      const hit = await cache.match(request);
+      if (hit) return hit;
+
+      let body;
+      if (url.pathname === '/api/online') {
+        body = (await liveOnline(env)) || { online: false, players: 0, list: [] };
+      } else {
+        const [t, c] = await Promise.all([liveTop(env), liveClans(env)]);
+        body = { players: (t && t.players) || [], clans: (c && c.clans) || [],
+                 updated: (t && t.updated) || nowSec() };
+      }
+      const res = new Response(JSON.stringify(body), {
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=15',
+        },
+      });
+      ctx.waitUntil(cache.put(request, res.clone()));
+      return res;
+    }
 
     if (url.pathname === '/tg' && request.method === 'POST') {
       if (env.TG_WEBHOOK_SECRET &&
