@@ -62,18 +62,59 @@ function findSteamId(text) {
   return l ? `STEAM_${l[1]}:${l[2]}:${l[3]}` : null;
 }
 
-function priceList(env) {
-  const parse = (raw) => {
-    const p = String(raw || '').split('|').map((x) => x.trim());
-    if (p.length < 4) return null;
-    return { kind: p[0], days: Number(p[1]), price: Number(p[2]), currency: p[3].toUpperCase() };
-  };
-  return {
-    vip_month: parse(env.PRICE_VIP_MONTH),
-    vip_forever: parse(env.PRICE_VIP_FOREVER),
-    admin_month: parse(env.PRICE_ADMIN_MONTH),
-    admin_forever: parse(env.PRICE_ADMIN_FOREVER),
-  };
+/* ------------------------------------------------------------ что продаём
+
+   Одна таблица на всё: какими словами позицию узнать в сообщении к
+   платежу, чем её выдать серверу и в какой файл сервер это пишет (чтобы
+   выдачу можно было проверить, а не поверить на слово).
+
+   Цены берутся из переменных окружения — их правят в Cloudflare, не в
+   коде. Значения в таблице лишь подстраховка, они совпадают с прайсом
+   на сайте. Срок: term true — есть месяц и навсегда, false — разовая. */
+
+const GOODS = [
+  {
+    key: 'admin', title: 'Админка', term: true,
+    words: ['админк', 'админ', 'admin'],
+    month: 60, forever: 150,
+    cmd: (id, days) => `zma_admin "${id}" ${days}`,
+    file: '/cstrike/addons/amxmodx/data/zm_admins.ini',
+  },
+  {
+    key: 'vip', title: 'VIP', term: true,
+    words: ['вип', 'vip'],
+    month: 30, forever: 90,
+    cmd: (id, days) => `zma_vip "${id}" ${days}`,
+    file: '/cstrike/addons/amxmodx/data/zm_vip.ini',
+  },
+  {
+    key: 'vamp', title: 'Вампиризм', term: true,
+    words: ['вампириз', 'вампир', 'vamp'],
+    month: 10, forever: 30,
+    cmd: (id, days) => `zm_vamp_add "${id}" ${days}`,
+    file: '/cstrike/addons/amxmodx/data/zm_vampire.ini',
+  },
+  {
+    key: 'ap3000', title: '3000 аммопаков', term: false,
+    words: ['аммопак', 'ammopack', 'аммо', 'ап 3000', '3000 ап'],
+    once: 10,
+    cmd: (id) => `zmc_giveap "${id}" 3000`,
+  },
+];
+
+const goodByKey = (key) => GOODS.find((g) => g.key === key) || null;
+
+/* Цена: PRICE_VIP_FOREVER, PRICE_VAMP_MONTH, PRICE_AP3000_ONCE и т.п. */
+function priceOf(env, good, forever) {
+  const suffix = good.term ? (forever ? 'FOREVER' : 'MONTH') : 'ONCE';
+  const raw = env[`PRICE_${good.key.toUpperCase()}_${suffix}`];
+  const fromEnv = Number(String(raw || '').split('|')[2] ?? raw);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+  return good.term ? (forever ? good.forever : good.month) : good.once;
+}
+
+function currencyOf(env) {
+  return String(env.PRICE_CURRENCY || 'EUR').toUpperCase();
 }
 
 function firstHit(low, words) {
@@ -85,29 +126,41 @@ function firstHit(low, words) {
   return best;
 }
 
-/** Что человек заказал. Тип и срок ищем по отдельности, чтобы «админка
- *  навсегда» не превращалась в месячную из-за слитного написания. */
+/** Что человек заказал. Позицию выбираем по самому раннему совпадению:
+ *  в «Admin + VIP» слово «admin» стоит первым, значит это админка.
+ *  Срок ищем отдельно, иначе «админка навсегда» уехала бы в месячную. */
 function matchItem(env, text) {
   const low = String(text || '').toLowerCase();
   const words = (v, d) => String(v || d).split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
 
-  const vi = firstHit(low, words(env.WORDS_VIP, 'вип,vip'));
-  const ai = firstHit(low, words(env.WORDS_ADMIN, 'админ,admin'));
-  if (vi === null && ai === null) return null;
+  let best = null;
+  for (const g of GOODS) {
+    const extra = words(env[`WORDS_${g.key.toUpperCase()}`], '');
+    const at = firstHit(low, g.words.concat(extra));
+    if (at === null) continue;
+    if (!best || at < best.at) best = { at, good: g };
+  }
+  if (!best) return null;
 
-  let kind;
-  if (ai === null) kind = 'vip';
-  else if (vi === null) kind = 'admin';
-  else kind = vi < ai ? 'vip' : 'admin';
+  const g = best.good;
+  const forever = g.term
+    && firstHit(low, words(env.WORDS_FOREVER, 'навсегда,forever')) !== null;
 
-  const forever = firstHit(low, words(env.WORDS_FOREVER, 'навсегда,forever')) !== null;
-  const item = priceList(env)[`${kind}_${forever ? 'forever' : 'month'}`];
-  return item ? { ...item, key: `${kind}_${forever ? 'forever' : 'month'}` } : null;
+  return {
+    key: g.key + (g.term ? (forever ? '_forever' : '_month') : ''),
+    kind: g.key,
+    days: g.term ? (forever ? 0 : 30) : 0,
+    price: priceOf(env, g, forever),
+    currency: currencyOf(env),
+    forever,
+  };
 }
 
 function titleOf(item) {
-  const base = item.kind === 'vip' ? 'VIP' : 'Админка';
-  return base + (item.days === 0 ? ' навсегда' : ` на ${item.days} дн.`);
+  const g = goodByKey(item.kind);
+  const base = g ? g.title : item.kind;
+  if (!g || !g.term) return base;
+  return base + (item.forever ? ' навсегда' : ` на ${item.days} дн.`);
 }
 
 function priceOk(item, amount, currency) {
@@ -142,21 +195,21 @@ async function serverFile(env, path) {
   return r.ok ? r.text() : null;
 }
 
-/** Выдать привилегию и, если получится, убедиться, что она записалась. */
+/** Выдать позицию и, если сервер пишет её в файл, проверить, что записалась. */
 async function grant(env, kind, steamid, days) {
-  const cmd = kind === 'admin'
-    ? `zma_admin "${steamid}" ${days}`
-    : `zma_vip "${steamid}" ${days}`;
+  const g = goodByKey(kind);
+  if (!g) return { ok: false, why: `не знаю позицию «${kind}»` };
 
-  const res = await serverCommand(env, cmd);
+  const res = await serverCommand(env, g.cmd(steamid, days));
   if (!res.ok) return { ok: false, why: `панель не приняла команду (код ${res.status})` };
 
-  if (kind !== 'vip') return { ok: true, verified: false };
+  if (!g.file) return { ok: true, verified: false };
 
-  // VIP пишется в файл — подождём и проверим, что SteamID там появился
+  /* Панель на команду ничего не возвращает, поэтому ждём и смотрим файл. */
   await new Promise((r) => setTimeout(r, 2500));
-  const txt = await serverFile(env, '/cstrike/addons/amxmodx/data/zm_vip.ini');
-  return { ok: true, verified: !!(txt && txt.includes(steamid)) };
+  const u8 = await panelBytes(env, g.file);
+  const txt = u8 ? decodeBytes(u8) : '';
+  return { ok: true, verified: txt.includes(steamid) };
 }
 
 /* ---------------------------------------------------------- DonationAlerts */
@@ -245,9 +298,11 @@ async function handleDonation(env, d) {
     return true;
   }
 
+  const good = goodByKey(item.kind);
+  const note = !good || !good.file ? ''
+    : (g.verified ? '\nЗапись в файле есть.' : '\n⚠️ В файле пока не вижу — проверь.');
   await say(env, adminChat(env),
-    `${head}\n\n✅ Выдано: <b>${esc(titleOf(item))}</b>\nSteamID: <code>${esc(steamid)}</code>` +
-    (item.kind === 'vip' ? (g.verified ? '\nЗапись в файле есть.' : '\n⚠️ В файле пока не вижу — проверь.') : ''));
+    `${head}\n\n✅ Выдано: <b>${esc(titleOf(item))}</b>\nSteamID: <code>${esc(steamid)}</code>` + note);
   return true;
 }
 
@@ -308,13 +363,13 @@ const HELP_USER =
   'Жалоба или спорный бан — напиши сюда текстом: свой ник, ник нарушителя, ' +
   'карту и примерное время. Передам администрации.';
 
-const HELP_ADMIN =
-  '\n\n<b>Для администрации</b>\n' +
-  '/vip STEAM_0:1:… дней — выдать VIP (0 = навсегда)\n' +
-  '/admin STEAM_0:1:… дней — выдать админку\n' +
-  '/pending — неразобранные донаты\n' +
-  '/done N — убрать из очереди\n' +
-  '/cmd команда — выполнить команду на сервере';
+const HELP_ADMIN = '\n\n<b>Для администрации</b>\n'
+  + GOODS.map((g) => g.term
+      ? `/${g.key} STEAM_0:1:… дней — ${g.title} (0 = навсегда)`
+      : `/${g.key} STEAM_0:1:… — ${g.title}`).join('\n')
+  + '\n/pending — неразобранные донаты\n'
+  + '/done N — убрать из очереди\n'
+  + '/cmd команда — выполнить команду на сервере';
 
 const fmt = (n) => (n === null || n === undefined || isNaN(n) ? '—' : Math.round(n).toLocaleString('ru-RU'));
 
@@ -670,16 +725,32 @@ async function cmdRank(env, chat, nick) {
 }
 
 async function cmdGrant(env, chat, kind, args) {
-  if (args.length < 2) return say(env, chat, `Формат: <code>/${kind} STEAM_0:1:12345 30</code> (0 = навсегда)`);
+  const good = goodByKey(kind);
+  if (!good) return say(env, chat, `Не знаю позицию «${esc(kind)}».`);
+
+  const need = good.term ? 2 : 1;
+  if (args.length < need) {
+    return say(env, chat, good.term
+      ? `Формат: <code>/${kind} STEAM_0:1:12345 30</code> (0 = навсегда)`
+      : `Формат: <code>/${kind} STEAM_0:1:12345</code>`);
+  }
+
   const steamid = findSteamId(args[0]);
   if (!steamid) return say(env, chat, `Это не похоже на SteamID: <code>${esc(args[0])}</code>`);
-  const days = parseInt(args[1], 10);
-  if (!Number.isFinite(days)) return say(env, chat, 'Дни числом.');
+
+  let days = 0;
+  if (good.term) {
+    days = parseInt(args[1], 10);
+    if (!Number.isFinite(days)) return say(env, chat, 'Дни числом.');
+  }
+
   const g = await grant(env, kind, steamid, days);
   if (!g.ok) return say(env, chat, `❌ ${esc(g.why)}`);
+
+  const note = !good.file ? ''
+    : (g.verified ? '\nЗапись в файле есть.' : '\n⚠️ В файле пока не вижу.');
   return say(env, chat,
-    `✅ Команда ушла: <b>${kind === 'admin' ? 'админка' : 'VIP'}</b> на <code>${esc(steamid)}</code>` +
-    (kind === 'vip' ? (g.verified ? '\nЗапись в файле есть.' : '\n⚠️ В файле пока не вижу.') : ''));
+    `✅ Команда ушла: <b>${esc(good.title)}</b> на <code>${esc(steamid)}</code>` + note);
 }
 
 async function cmdPending(env, chat) {
@@ -734,7 +805,8 @@ async function onMessage(env, m) {
   if (cmd === '/rank') return cmdRank(env, chat, args.join(' '));
 
   if (adm) {
-    if (cmd === '/vip' || cmd === '/admin') return cmdGrant(env, chat, cmd.slice(1), args);
+    const key = cmd.slice(1);
+    if (goodByKey(key)) return cmdGrant(env, chat, key, args);
     if (cmd === '/pending') return cmdPending(env, chat);
     if (cmd === '/done') return cmdDone(env, chat, args);
     if (cmd === '/cmd') {
