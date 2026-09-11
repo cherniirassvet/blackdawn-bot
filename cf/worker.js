@@ -258,7 +258,11 @@ async function daGet(env, path) {
   const r = await fetch(DA + path, {
     headers: { Authorization: `Bearer ${await daToken(env)}`, Accept: 'application/json' },
   });
-  if (!r.ok) throw new Error(`DonationAlerts ответил ${r.status}`);
+  if (!r.ok) {
+    const e = new Error(`DonationAlerts ответил ${r.status}`);
+    e.status = r.status;
+    throw e;
+  }
   return r.json();
 }
 
@@ -358,6 +362,71 @@ function firstTime(id) {
   seenUpdates.add(id);
   if (seenUpdates.size > 500) seenUpdates.delete(seenUpdates.values().next().value);
   return true;
+}
+
+/* --------------------------------------------------- сбои чтения донатов
+
+   Опрос идёт раз в минуту, и у DonationAlerts бывают короткие провалы
+   (522 и прочие пятисотые - это их сторона, а не наша). Кричать о таком
+   сразу незачем: к следующей минуте обычно само проходит. Поэтому
+   временные сбои копим молча и сообщаем, только если не отпускает
+   четверть часа, - и обязательно пишем, когда всё вернулось.
+
+   Отдельно - сломанная привязка (401/403). Это само не пройдёт, нужен
+   повторный вход, о таком говорим сразу. */
+
+const DA_QUIET_MS = 15 * 60 * 1000;
+
+function daTransient(e) {
+  const s = Number(e && e.status);
+  if (!s) return true;                 /* сеть не ответила - тоже временное */
+  return s >= 500 || s === 429 || s === 408;
+}
+
+async function daFailed(env, e) {
+  const now = Date.now();
+  let st = null;
+  try { st = await getJson(env, 'da_fail', null); } catch (_) { /* ничего */ }
+
+  if (!daTransient(e)) {
+    /* привязка отвалилась - это к администратору */
+    if (!st || st.kind !== 'auth' || now - st.told > 3600000) {
+      await putJson(env, 'da_fail', { kind: 'auth', since: (st && st.since) || now, told: now });
+      await say(env, adminChat(env),
+        `🔴 Донаты не читаются: ${esc(e.message || e)}\n\n`
+        + 'Похоже, слетела привязка DonationAlerts. Нужно заново открыть '
+        + '<code>/da/login</code> — сама она не восстановится.');
+    }
+    return;
+  }
+
+  const since = (st && st.kind === 'soft') ? st.since : now;
+  const told  = (st && st.kind === 'soft') ? st.told : 0;
+
+  /* молчим, пока не затянулось, и потом не чаще раза в час */
+  if (now - since >= DA_QUIET_MS && now - told > 3600000) {
+    await putJson(env, 'da_fail', { kind: 'soft', since, told: now });
+    const mins = Math.round((now - since) / 60000);
+    await say(env, adminChat(env),
+      `⚠️ Донаты не читаются уже ${mins} мин: ${esc(e.message || e)}\n\n`
+      + 'Это сторона DonationAlerts, у нас всё на месте. Донаты не потеряются — '
+      + 'бот разберёт их, как только сервис ответит. Напишу, когда вернётся.');
+    return;
+  }
+
+  if (!st || st.kind !== 'soft') await putJson(env, 'da_fail', { kind: 'soft', since, told });
+}
+
+async function daRecovered(env) {
+  let st = null;
+  try { st = await getJson(env, 'da_fail', null); } catch (_) { return; }
+  if (!st) return;
+
+  await env.STATE.delete('da_fail');
+  if (!st.told) return;                /* о сбое не сообщали - молчим и о возврате */
+
+  const mins = Math.round((Date.now() - st.since) / 60000);
+  await say(env, adminChat(env), `🟢 Донаты снова читаются. Не работало примерно ${mins} мин.`);
 }
 
 /* ---------------------------------------------------------------- Telegram */
@@ -992,14 +1061,10 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(pollDonations(env).catch(async (e) => {
-      // о поломке узнаём сразу, а не когда игрок пожалуется
-      const last = await env.STATE.get('last_error_at');
-      const now = Date.now();
-      if (!last || now - Number(last) > 3600000) {
-        await env.STATE.put('last_error_at', String(now));
-        await say(env, adminChat(env), `⚠️ Донаты не читаются: ${esc(e.message || e)}`);
-      }
-    }));
+    ctx.waitUntil(
+      pollDonations(env)
+        .then(() => daRecovered(env))
+        .catch((e) => daFailed(env, e)),
+    );
   },
 };
