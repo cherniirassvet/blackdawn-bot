@@ -95,6 +95,15 @@ const GOODS = [
     file: '/cstrike/addons/amxmodx/data/zm_vampire.ini',
   },
   {
+    key: 'ammo', title: 'Бесконечные патроны', term: true,
+    /* слово «ammo» сюда не берём: оно есть внутри «ammopack» и увело бы
+       заказ аммопаков в эту позицию */
+    words: ['бесконечн', 'обойм', 'патрон'],
+    month: 30, forever: 90,
+    cmd: (id, days) => `zma_perk "${id}" ammo ${days}`,
+    file: '/cstrike/addons/amxmodx/data/zm_perks.ini',
+  },
+  {
     key: 'ap3000', title: '3000 аммопаков', term: false,
     words: ['аммопак', 'ammopack', 'аммо', 'ап 3000', '3000 ап'],
     once: 10,
