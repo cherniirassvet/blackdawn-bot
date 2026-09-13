@@ -104,6 +104,17 @@ const GOODS = [
     file: '/cstrike/addons/amxmodx/data/zm_perks.ini',
   },
   {
+    key: 'model', title: 'Персональная модель', term: true,
+    words: ['модел', 'model', 'скин'],
+    month: 20, forever: 60,
+    /* Третьим аргументом идёт выбранная модель - номер из /models или
+       имя папки. Без неё выдавать нечего, поэтому arg: true. */
+    arg: true,
+    argHint: 'номер модели из /models',
+    cmd: (id, days, arg) => `zmc_setmodel "${id}" ${arg} ${days}`,
+    file: '/cstrike/addons/amxmodx/data/zm_user_models.ini',
+  },
+  {
     key: 'ap3000', title: '3000 аммопаков', term: false,
     words: ['аммопак', 'ammopack', 'аммо', 'ап 3000', '3000 ап'],
     once: 10,
@@ -155,6 +166,13 @@ function matchItem(env, text) {
   const forever = g.term
     && firstHit(low, words(env.WORDS_FOREVER, 'навсегда,forever')) !== null;
 
+  /* «модель 3», «model gign», «скин №7» - что именно человек выбрал. */
+  let arg = null;
+  if (g.arg) {
+    const m = String(text || '').match(/(?:модел|model|скин)[а-яёa-z]*\s*[№#:-]?\s*(?!STEAM_)([A-Za-z0-9_]{1,31})/i);
+    if (m) arg = m[1];
+  }
+
   return {
     key: g.key + (g.term ? (forever ? '_forever' : '_month') : ''),
     kind: g.key,
@@ -162,12 +180,14 @@ function matchItem(env, text) {
     price: priceOf(env, g, forever),
     currency: currencyOf(env),
     forever,
+    arg,
   };
 }
 
 function titleOf(item) {
   const g = goodByKey(item.kind);
-  const base = g ? g.title : item.kind;
+  let base = g ? g.title : item.kind;
+  if (g && g.arg && item.arg) base += ` (${item.arg})`;
   if (!g || !g.term) return base;
   return base + (item.forever ? ' навсегда' : ` на ${item.days} дн.`);
 }
@@ -205,11 +225,12 @@ async function serverFile(env, path) {
 }
 
 /** Выдать позицию и, если сервер пишет её в файл, проверить, что записалась. */
-async function grant(env, kind, steamid, days) {
+async function grant(env, kind, steamid, days, arg) {
   const g = goodByKey(kind);
   if (!g) return { ok: false, why: `не знаю позицию «${kind}»` };
+  if (g.arg && !arg) return { ok: false, why: `не указан ${g.argHint || 'параметр'}` };
 
-  const res = await serverCommand(env, g.cmd(steamid, days));
+  const res = await serverCommand(env, g.cmd(steamid, days, arg));
   if (!res.ok) return { ok: false, why: `панель не приняла команду (код ${res.status})` };
 
   if (!g.file) return { ok: true, verified: false };
@@ -305,7 +326,13 @@ async function handleDonation(env, d) {
     return true;
   }
 
-  const g = await grant(env, item.kind, steamid, item.days);
+  const need = goodByKey(item.kind);
+  if (need && need.arg && !item.arg) {
+    await park(`не указан ${need.argHint || 'параметр'}`);
+    return true;
+  }
+
+  const g = await grant(env, item.kind, steamid, item.days, item.arg);
   if (!g.ok) {
     await park(g.why);
     return true;
@@ -437,14 +464,18 @@ const HELP_USER =
   '/top — пятнадцать первых по убийствам\n' +
   '/clans — топ кланов\n' +
   '/rank ник — место игрока\n' +
+  '/models — модели персонажа и их номера\n' +
   '/ip — адрес сервера\n\n' +
   'Жалоба или спорный бан — напиши сюда текстом: свой ник, ник нарушителя, ' +
   'карту и примерное время. Передам администрации.';
 
 const HELP_ADMIN = '\n\n<b>Для администрации</b>\n'
-  + GOODS.map((g) => g.term
-      ? `/${g.key} STEAM_0:1:… дней — ${g.title} (0 = навсегда)`
-      : `/${g.key} STEAM_0:1:… — ${g.title}`).join('\n')
+  + GOODS.map((g) => {
+      const a = g.arg ? ' номер' : '';
+      return g.term
+        ? `/${g.key} STEAM_0:1:…${a} дней — ${g.title} (0 = навсегда)`
+        : `/${g.key} STEAM_0:1:…${a} — ${g.title}`;
+    }).join('\n')
   + '\n/pending — неразобранные донаты\n'
   + '/done N — убрать из очереди\n'
   + '/cmd команда — выполнить команду на сервере';
@@ -806,29 +837,66 @@ async function cmdGrant(env, chat, kind, args) {
   const good = goodByKey(kind);
   if (!good) return say(env, chat, `Не знаю позицию «${esc(kind)}».`);
 
-  const need = good.term ? 2 : 1;
+  /* У модели порядок такой: /model STEAM_… <номер> <дней>. */
+  const need = (good.term ? 2 : 1) + (good.arg ? 1 : 0);
   if (args.length < need) {
-    return say(env, chat, good.term
-      ? `Формат: <code>/${kind} STEAM_0:1:12345 30</code> (0 = навсегда)`
-      : `Формат: <code>/${kind} STEAM_0:1:12345</code>`);
+    const tail = (good.arg ? ' 1' : '') + (good.term ? ' 30' : '');
+    return say(env, chat,
+      `Формат: <code>/${kind} STEAM_0:1:12345${tail}</code>`
+      + (good.arg ? `\n${esc(good.argHint || 'параметр')} — список: /models` : '')
+      + (good.term ? '\n0 дней = навсегда' : ''));
   }
 
   const steamid = findSteamId(args[0]);
   if (!steamid) return say(env, chat, `Это не похоже на SteamID: <code>${esc(args[0])}</code>`);
 
+  let at = 1;
+  let arg = null;
+  if (good.arg) arg = args[at++];
+
   let days = 0;
   if (good.term) {
-    days = parseInt(args[1], 10);
+    days = parseInt(args[at], 10);
     if (!Number.isFinite(days)) return say(env, chat, 'Дни числом.');
   }
 
-  const g = await grant(env, kind, steamid, days);
+  const g = await grant(env, kind, steamid, days, arg);
   if (!g.ok) return say(env, chat, `❌ ${esc(g.why)}`);
 
   const note = !good.file ? ''
     : (g.verified ? '\nЗапись в файле есть.' : '\n⚠️ В файле пока не вижу.');
   return say(env, chat,
     `✅ Команда ушла: <b>${esc(good.title)}</b> на <code>${esc(steamid)}</code>` + note);
+}
+
+/** Список моделей, которые можно взять: читаем тот же файл, из которого
+ *  их берёт плагин, чтобы список в боте не разъезжался с игрой. */
+async function modelList(env) {
+  const u8 = await panelBytes(env, '/cstrike/addons/amxmodx/configs/zm_models.ini');
+  const txt = u8 ? decodeBytes(u8) : '';
+  if (!txt) return null;
+
+  const rows = [];
+  for (const raw of txt.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line[0] === ';') continue;
+    const m = line.match(/^"([^"]*)"\s+"?([A-Za-z0-9_]+)"?\s*(\d*)/);
+    if (m) rows.push({ n: rows.length + 1, name: m[1], folder: m[2], cost: Number(m[3] || 0) });
+  }
+  return rows;
+}
+
+async function cmdModels(env, chat) {
+  const rows = await modelList(env);
+  if (!rows) return say(env, chat, 'Список моделей сейчас не читается. Попробуй позже.');
+  if (!rows.length) return say(env, chat, 'Моделей в списке пока нет.');
+
+  const lines = ['<b>Модели персонажа</b>'];
+  rows.forEach((r, i) => lines.push(
+    `${i + 1}. <b>${esc(r.name)}</b> — <code>${esc(r.folder)}</code>` + (r.cost > 0 ? ` · ${r.cost} АП` : '')));
+  lines.push('\nВ игре модель берут за аммопаки в меню.');
+  lines.push('За деньги: в комментарии к оплате напиши свой SteamID и <i>модель N</i> — номер из списка.');
+  return say(env, chat, lines.join('\n'));
 }
 
 async function cmdPending(env, chat) {
@@ -881,6 +949,8 @@ async function onMessage(env, m) {
   if (cmd === '/top' || cmd === '/top15' || cmd === '/stats') return cmdTop(env, chat);
   if (cmd === '/clans' || cmd === '/clan' || cmd === '/topclans') return cmdClans(env, chat);
   if (cmd === '/rank') return cmdRank(env, chat, args.join(' '));
+  /* «/model» без прав - это просьба показать список, а не выдача. */
+  if (cmd === '/models' || (cmd === '/model' && !adm)) return cmdModels(env, chat);
 
   if (adm) {
     const key = cmd.slice(1);
@@ -939,13 +1009,17 @@ export default {
       }});
     }
 
-    if (url.pathname === '/api/online' || url.pathname === '/api/top') {
+    if (url.pathname === '/api/online' || url.pathname === '/api/top' || url.pathname === '/api/models') {
       const cache = caches.default;
       const hit = await cache.match(request);
       if (hit) return hit;
 
       let body;
-      if (url.pathname === '/api/online') {
+      if (url.pathname === '/api/models') {
+        /* Названия моделей - не секрет, это витрина: сайт по ней даёт
+           выбрать модель при заказе. */
+        body = { models: (await modelList(env)) || [] };
+      } else if (url.pathname === '/api/online') {
         const o = (await liveOnline(env)) || { online: false, players: 0, list: [] };
         /* SteamID из общего списка убираем - он нужен только точечному
            поиску по нику, а не всем подряд. */
