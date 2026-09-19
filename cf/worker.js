@@ -70,27 +70,28 @@ function findSteamId(text) {
 
    Цены берутся из переменных окружения — их правят в Cloudflare, не в
    коде. Значения в таблице лишь подстраховка, они совпадают с прайсом
-   на сайте. Срок: term true — есть месяц и навсегда, false — разовая. */
+   на сайте (сверено 19.09.2026). Срок: term true — есть месяц и навсегда,
+   false — разовая. */
 
 const GOODS = [
   {
     key: 'admin', title: 'Админка', term: true,
     words: ['админк', 'админ', 'admin'],
-    month: 60, forever: 150,
+    month: 20, forever: 120,
     cmd: (id, days) => `zma_admin "${id}" ${days}`,
     file: '/cstrike/addons/amxmodx/data/zm_admins.ini',
   },
   {
     key: 'vip', title: 'VIP', term: true,
     words: ['вип', 'vip'],
-    month: 30, forever: 90,
+    month: 10, forever: 60,
     cmd: (id, days) => `zma_vip "${id}" ${days}`,
     file: '/cstrike/addons/amxmodx/data/zm_vip.ini',
   },
   {
     key: 'vamp', title: 'Вампиризм', term: true,
     words: ['вампириз', 'вампир', 'vamp'],
-    month: 10, forever: 30,
+    month: 10, forever: 60,
     cmd: (id, days) => `zm_vamp_add "${id}" ${days}`,
     file: '/cstrike/addons/amxmodx/data/zm_vampire.ini',
   },
@@ -99,14 +100,14 @@ const GOODS = [
     /* слово «ammo» сюда не берём: оно есть внутри «ammopack» и увело бы
        заказ аммопаков в эту позицию */
     words: ['бесконечн', 'обойм', 'патрон'],
-    month: 30, forever: 90,
+    month: 30, forever: 180,
     cmd: (id, days) => `zma_perk "${id}" ammo ${days}`,
     file: '/cstrike/addons/amxmodx/data/zm_perks.ini',
   },
   {
     key: 'model', title: 'Персональная модель', term: true,
     words: ['модел', 'model', 'скин'],
-    month: 20, forever: 60,
+    month: 20, forever: 120,
     /* Третьим аргументом идёт выбранная модель - номер из /models или
        имя папки. Без неё выдавать нечего, поэтому arg: true. */
     arg: true,
@@ -465,6 +466,7 @@ const HELP_USER =
   '/clans — топ кланов\n' +
   '/rank ник — место игрока\n' +
   '/models — модели персонажа и их номера\n' +
+  '/donate — привилегии, цены и как оплатить\n' +
   '/ip — адрес сервера\n\n' +
   'Жалоба или спорный бан — напиши сюда текстом: свой ник, ник нарушителя, ' +
   'карту и примерное время. Передам администрации.';
@@ -773,7 +775,7 @@ async function cmdOnline(env, chat) {
 async function cmdClans(env, chat) {
   const j = await liveClans(env);
   const cl = ((j && j.clans) || []).slice()
-    .sort((a, b) => (b.exp - a.exp) || (b.level - a.level));
+    .sort((a, b) => (b.level - a.level) || (b.exp - a.exp));
   if (!cl.length) return say(env, chat, 'Кланов пока нет. Создать можно в игре: меню на клавише M.');
 
   const blocks = cl.slice(0, 15).map((c, i) => {
@@ -899,6 +901,54 @@ async function cmdModels(env, chat) {
   return say(env, chat, lines.join('\n'));
 }
 
+/* Раздел «Донаты»: постер с прайсом плюс тот же прайс текстом — цены можно
+   скопировать, и раздел читается, даже если картинка не дошла.
+   Цены берём из той же таблицы GOODS и тех же переменных окружения, по которым
+   работает автовыдача: иначе объявленная цена и выдача разойдутся. */
+
+const DONATE_IMG = 'http://195.60.166.224:27375/privilegii.png';
+const DONATE_URL = 'https://www.donationalerts.com/r/161vatakat161';
+const SITE_URL = 'https://cherniirassvet.github.io';
+
+function donateText(env) {
+  const c = currencyOf(env) === 'EUR' ? '\u20AC' : currencyOf(env);
+  const lines = ['<b>Донаты и привилегии</b>', ''];
+
+  for (const g of GOODS) {
+    lines.push(g.term
+      ? `<b>${esc(g.title)}</b> — месяц ${priceOf(env, g, false)} ${c} · навсегда ${priceOf(env, g, true)} ${c}`
+      : `<b>${esc(g.title)}</b> — ${priceOf(env, g, false)} ${c}`);
+  }
+
+  lines.push('');
+  lines.push(`<b>Оплата:</b> ${DONATE_URL}`);
+  lines.push('В комментарии к оплате напиши свой SteamID и что берёшь — например');
+  lines.push('<code>STEAM_0:1:123456 VIP навсегда</code>');
+  lines.push('Привилегия выдаётся автоматически, обычно в течение минуты.');
+  lines.push('');
+  lines.push(`Кланы и весь прайс целиком: ${SITE_URL}`);
+  lines.push('50% донатов уходит в приюты для бездомных животных.');
+  return lines.join('\n');
+}
+
+async function cmdDonate(env, chat) {
+  const text = donateText(env);
+
+  /* Подпись к фото у Телеграма ограничена 1024 символами. */
+  const long = [...text].length > 1024;
+
+  /* Картинка лежит на fastdl, отдаётся по http и нестандартному порту — если
+     Телеграм её не заберёт, раздел всё равно должен прийти текстом. */
+  const r = await tg(env, 'sendPhoto', {
+    chat_id: chat,
+    photo: DONATE_IMG,
+    ...(long ? {} : { caption: text, parse_mode: 'HTML' }),
+  });
+
+  if (!r || !r.ok || long) return say(env, chat, text);
+  return r;
+}
+
 async function cmdPending(env, chat) {
   const p = await getJson(env, 'pending', []);
   if (!p.length) return say(env, chat, 'Очередь пуста.');
@@ -951,6 +1001,9 @@ async function onMessage(env, m) {
   if (cmd === '/rank') return cmdRank(env, chat, args.join(' '));
   /* «/model» без прав - это просьба показать список, а не выдача. */
   if (cmd === '/models' || (cmd === '/model' && !adm)) return cmdModels(env, chat);
+  /* Без псевдонима /vip: у администрации это выдача привилегии. */
+  if (cmd === '/donate' || cmd === '/donat' || cmd === '/price' || cmd === '/prices')
+    return cmdDonate(env, chat);
 
   if (adm) {
     const key = cmd.slice(1);
