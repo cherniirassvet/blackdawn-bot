@@ -457,6 +457,49 @@ async function daRecovered(env) {
   await say(env, adminChat(env), `🟢 Донаты снова читаются. Не работало примерно ${mins} мин.`);
 }
 
+/* ------------------------------------------------------- кто зашёл на сервер */
+
+/* Раз в минуту сравниваем список игроков с прошлым тиком и пишем администрации
+   о новых живых людях. Боты не в счёт.
+
+   Читаем файл строго из панели: запасной путь через сайт отдаёт данные
+   пятнадцатиминутной давности, и на нём «заходы» посыпались бы на ровном месте.
+   Панель молчит — тик просто пропускаем, прошлый список не трогаем. */
+async function pollJoins(env) {
+  if (await getJson(env, 'joins_off', 0)) return;
+
+  const u8 = await panelBytes(env, SRV + 'zm_online.json');
+  if (!u8 || !u8.length) return;
+
+  let j;
+  try { j = JSON.parse(decodeBytes(u8)); } catch (e) { return; }
+  if (!j || !Array.isArray(j.list)) return;
+
+  const humans = j.list.filter((p) => !p.bot);
+
+  /* Ключ — SteamID, если он есть: ник меняется вместе с клановым тегом,
+     и по нику один и тот же человек выглядел бы как новый. */
+  const keyOf = (p) => String(p.steam || '').toUpperCase() || 'ник:' + String(p.name || '');
+  const now = humans.map((p) => ({ k: keyOf(p), name: String(p.name || '') })).filter((x) => x.k);
+
+  const prev = await getJson(env, 'online_keys', null);
+  await putJson(env, 'online_keys', now.map((x) => x.k));
+
+  /* Первый запуск воркера или перезапуск: только запоминаем, иначе разом
+     прилетит весь текущий состав. */
+  if (!Array.isArray(prev)) return;
+
+  const fresh = now.filter((x) => !prev.includes(x.k));
+  if (!fresh.length) return;
+
+  const lines = fresh.map((x) => `\u{1F7E2} Зашёл <b>${esc(x.name)}</b>`);
+  lines.push('');
+  lines.push(`Людей на сервере: <b>${humans.length}</b>, всего с ботами: ${j.list.length}`
+    + (j.map ? ` \u00B7 карта <code>${esc(j.map)}</code>` : ''));
+
+  await say(env, adminChat(env), lines.join('\n'));
+}
+
 /* ---------------------------------------------------------------- Telegram */
 
 const HELP_USER =
@@ -478,7 +521,8 @@ const HELP_ADMIN = '\n\n<b>Для администрации</b>\n'
         ? `/${g.key} STEAM_0:1:…${a} дней — ${g.title} (0 = навсегда)`
         : `/${g.key} STEAM_0:1:…${a} — ${g.title}`;
     }).join('\n')
-  + '\n/pending — неразобранные донаты\n'
+  + '\n/joins — включить или выключить сообщения о заходах\n'
+  + '/pending — неразобранные донаты\n'
   + '/done N — убрать из очереди\n'
   + '/cmd команда — выполнить команду на сервере';
 
@@ -1008,6 +1052,13 @@ async function onMessage(env, m) {
   if (adm) {
     const key = cmd.slice(1);
     if (goodByKey(key)) return cmdGrant(env, chat, key, args);
+    if (cmd === '/joins') {
+      const off = await getJson(env, 'joins_off', 0);
+      await putJson(env, 'joins_off', off ? 0 : 1);
+      return say(env, chat, off
+        ? 'Сообщения о заходах включены.'
+        : 'Сообщения о заходах выключены. Включить — этой же командой.');
+    }
     if (cmd === '/pending') return cmdPending(env, chat);
     if (cmd === '/done') return cmdDone(env, chat, args);
     if (cmd === '/cmd') {
@@ -1193,5 +1244,8 @@ export default {
         .then(() => daRecovered(env))
         .catch((e) => daFailed(env, e)),
     );
+    /* Заходы считаем отдельной цепочкой: сбой доната не должен их глушить,
+       и наоборот. */
+    ctx.waitUntil(pollJoins(env).catch(() => {}));
   },
 };
