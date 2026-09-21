@@ -950,7 +950,7 @@ async function cmdModels(env, chat) {
    Цены берём из той же таблицы GOODS и тех же переменных окружения, по которым
    работает автовыдача: иначе объявленная цена и выдача разойдутся. */
 
-const DONATE_IMG = 'http://195.60.166.224:27375/privilegii.png';
+const DONATE_IMG = 'https://cherniirassvet.github.io/img/privilegii.png';
 const DONATE_URL = 'https://www.donationalerts.com/r/161vatakat161';
 const SITE_URL = 'https://cherniirassvet.github.io';
 
