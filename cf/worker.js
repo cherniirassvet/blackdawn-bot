@@ -125,13 +125,31 @@ const GOODS = [
 
 const goodByKey = (key) => GOODS.find((g) => g.key === key) || null;
 
+/* Скидка на всё, что продаётся за деньги. Конец - первая секунда после
+   последнего дня акции по Минску. SALE_PCT / SALE_UNTIL в Cloudflare
+   перебивают значения отсюда; SALE_PCT 0 - скидку выключить. */
+const SALE = { pct: 50, until: '2026-11-01T00:00:00+03:00', name: 'Хэллоуин-скидка', last: '31.10' };
+
+function saleNow(env) {
+  const pct = Number(env.SALE_PCT ?? SALE.pct);
+  const until = Date.parse(env.SALE_UNTIL || SALE.until);
+  if (!(pct > 0 && pct < 100) || !(Date.now() < until)) return null;
+  return { pct, name: SALE.name, last: SALE.last };
+}
+
 /* Цена: PRICE_VIP_FOREVER, PRICE_VAMP_MONTH, PRICE_AP3000_ONCE и т.п. */
-function priceOf(env, good, forever) {
+function basePriceOf(env, good, forever) {
   const suffix = good.term ? (forever ? 'FOREVER' : 'MONTH') : 'ONCE';
   const raw = env[`PRICE_${good.key.toUpperCase()}_${suffix}`];
   const fromEnv = Number(String(raw || '').split('|')[2] ?? raw);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
   return good.term ? (forever ? good.forever : good.month) : good.once;
+}
+
+function priceOf(env, good, forever) {
+  const base = basePriceOf(env, good, forever);
+  const s = saleNow(env);
+  return s ? Math.round(base * (100 - s.pct)) / 100 : base;
 }
 
 function currencyOf(env) {
@@ -510,6 +528,7 @@ const HELP_USER =
   '/rank ник — место игрока\n' +
   '/models — модели персонажа и их номера\n' +
   '/donate — привилегии, цены и как оплатить\n' +
+  '/code 123456 — награда 500 аммопаков за подписку на канал (код: /tg в игре)\n' +
   '/ip — адрес сервера\n\n' +
   'Жалоба или спорный бан — напиши сюда текстом: свой ник, ник нарушителя, ' +
   'карту и примерное время. Передам администрации.';
@@ -956,12 +975,20 @@ const SITE_URL = 'https://cherniirassvet.github.io';
 
 function donateText(env) {
   const c = currencyOf(env) === 'EUR' ? '\u20AC' : currencyOf(env);
+  const s = saleNow(env);
   const lines = ['<b>Донаты и привилегии</b>', ''];
+  if (s) lines.push(`🎃 <b>${esc(s.name)} −${s.pct}% до ${s.last} включительно!</b>`, '');
 
+  /* Во время скидки рядом с ценой зачёркнутая старая. */
+  const p = (g, f) => {
+    const now = priceOf(env, g, f);
+    const old = basePriceOf(env, g, f);
+    return s && old !== now ? `<s>${old}</s> ${now} ${c}` : `${now} ${c}`;
+  };
   for (const g of GOODS) {
     lines.push(g.term
-      ? `<b>${esc(g.title)}</b> — месяц ${priceOf(env, g, false)} ${c} · навсегда ${priceOf(env, g, true)} ${c}`
-      : `<b>${esc(g.title)}</b> — ${priceOf(env, g, false)} ${c}`);
+      ? `<b>${esc(g.title)}</b> — месяц ${p(g, false)} · навсегда ${p(g, true)}`
+      : `<b>${esc(g.title)}</b> — ${p(g, false)}`);
   }
 
   lines.push('');
@@ -991,6 +1018,58 @@ async function cmdDonate(env, chat) {
 
   if (!r || !r.ok || long) return say(env, chat, text);
   return r;
+}
+
+/* Награда за подписку на канал.
+   В игре игрок пишет /tg - плагин zm_events_ru показывает шестизначный код и
+   пишет строку «КОД STEAMID» в zm_tgcodes.ini. Игрок присылает код боту, бот
+   проверяет подписку и велит серверу выдать награду. Один Телеграм - одна
+   награда, один SteamID - одна награда (второе держит сам плагин). */
+
+const TG_CODES = '/cstrike/addons/amxmodx/data/zm_tgcodes.ini';
+
+function tgChannel(env) {
+  return env.TG_CHANNEL || '@cherniirassvet';
+}
+
+async function isSubscribed(env, userId) {
+  const r = await tg(env, 'getChatMember', { chat_id: tgChannel(env), user_id: userId });
+  if (!r || !r.ok) return { ok: false, why: (r && r.description) || 'нет ответа' };
+  const st = r.result && r.result.status;
+  return { ok: true, member: ['member', 'administrator', 'creator', 'restricted'].includes(st), status: st };
+}
+
+async function cmdCode(env, chat, from, code) {
+  if (!/^\d{6}$/.test(code)) {
+    return say(env, chat, 'Код — шесть цифр. Получить его: на сервере напиши в чат <code>/tg</code>.');
+  }
+
+  const used = await getJson(env, 'tg_rewarded', {});
+  if (used[from.id]) return say(env, chat, 'Награду за подписку этот Телеграм уже получал.');
+
+  const sub = await isSubscribed(env, from.id);
+  if (!sub.ok) {
+    await say(env, adminChat(env), `⚠️ Не могу проверить подписку на ${esc(tgChannel(env))}: ${esc(sub.why)}. Бот должен быть админом канала.`);
+    return say(env, chat, 'Сейчас не получается проверить подписку. Администрация уже знает, попробуй позже.');
+  }
+  if (!sub.member) {
+    return say(env, chat, `Сначала подпишись на канал ${esc(tgChannel(env))}, потом пришли код ещё раз.`);
+  }
+
+  const u8 = await panelBytes(env, TG_CODES);
+  const txt = u8 ? decodeBytes(u8) : '';
+  const line = txt.split(/\r?\n/).map((l) => l.trim().split(/\s+/)).find((p) => p[0] === code);
+  if (!line || !line[1]) {
+    return say(env, chat, 'Такого кода нет. Проверь цифры или получи новый: на сервере <code>/tg</code>.');
+  }
+  const steamid = line[1];
+
+  const res = await serverCommand(env, `zm_tg_reward "${steamid}" ${code}`);
+  if (!res.ok) return say(env, chat, 'Сервер сейчас не отвечает. Попробуй через пару минут.');
+
+  used[from.id] = steamid;
+  await putJson(env, 'tg_rewarded', used);
+  return say(env, chat, '✅ Подписка проверена! Награда придёт в игре. Если ты сейчас не на сервере — получишь при следующем заходе.');
 }
 
 async function cmdPending(env, chat) {
@@ -1048,6 +1127,9 @@ async function onMessage(env, m) {
   /* Без псевдонима /vip: у администрации это выдача привилегии. */
   if (cmd === '/donate' || cmd === '/donat' || cmd === '/price' || cmd === '/prices')
     return cmdDonate(env, chat);
+  /* Код за подписку: «/code 123456» или просто шесть цифр в личке. */
+  if (cmd === '/code' || cmd === '/kod') return cmdCode(env, chat, from, (args[0] || '').trim());
+  if (priv && /^\d{6}$/.test(text)) return cmdCode(env, chat, from, text);
 
   if (adm) {
     const key = cmd.slice(1);
@@ -1060,6 +1142,12 @@ async function onMessage(env, m) {
         : 'Сообщения о заходах выключены. Включить — этой же командой.');
     }
     if (cmd === '/pending') return cmdPending(env, chat);
+    if (cmd === '/tgcheck') {
+      const r = await isSubscribed(env, from.id);
+      return say(env, chat, r.ok
+        ? `Проверка подписки работает: твой статус в ${esc(tgChannel(env))} — ${esc(r.status)}.`
+        : `❌ Проверка не работает: ${esc(r.why)}. Сделай бота админом канала.`);
+    }
     if (cmd === '/done') return cmdDone(env, chat, args);
     if (cmd === '/cmd') {
       if (!args.length) return say(env, chat, 'Например: <code>/cmd status</code>');
