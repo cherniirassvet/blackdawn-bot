@@ -521,7 +521,8 @@ async function pollJoins(env) {
 
 /* ------------------------------------------------------------ посты в канал */
 
-const LIVE_MIN = 2;                 // со скольких живых звать в канал
+const LIVE_MIN = 1;                 // со скольких живых звать в канал
+const HOWTO_THREAD = 12342;         // тема «Как зайти на сервер» в группе
 const LIVE_GAP = 2 * 3600 * 1000;   // не чаще раза в два часа
 
 function addrOf(env) {
@@ -546,7 +547,9 @@ async function liveToChannel(env, n) {
   const last = await getJson(env, 'live_ts', 0);
   if (Date.now() - last < LIVE_GAP) return;
   const r = await post(env,
-    `\u{1F525} <b>Сейчас на сервере ${n} ${plural(n, 'живой игрок', 'живых игрока', 'живых игроков')}</b> — заходи, пока жарко!\n\n`
+    (n === 1
+      ? '\u{1F525} <b>На сервер зашёл живой игрок</b> — заходи, составь компанию!\n\n'
+      : `\u{1F525} <b>Сейчас на сервере ${n} ${plural(n, 'живой игрок', 'живых игрока', 'живых игроков')}</b> — заходи, пока жарко!\n\n`)
     + `☣️ <code>${addrOf(env)}</code>\nКонсоль (~) → <code>connect ${addrOf(env)}</code>`);
   if (r && r.ok) await putJson(env, 'live_ts', Date.now());
 }
@@ -567,14 +570,16 @@ const HOWTO = (env) =>
 async function channelJobs(env) {
   const t = minsk();
 
-  /* Закреплённый пост «как зайти» — один раз. */
-  if (!(await env.STATE.get('howto_v1'))) {
-    const r = await post(env, HOWTO(env));
+  /* Пост «как зайти» — один раз, в своей теме; старый из «Общего» убираем. */
+  if (!(await env.STATE.get('howto_v2'))) {
+    const r = await post(env, HOWTO(env), { message_thread_id: HOWTO_THREAD });
     if (r && r.ok) {
       await tg(env, 'pinChatMessage', { chat_id: tgChannel(env), message_id: r.result.message_id, disable_notification: true });
-      await env.STATE.put('howto_v1', String(r.result.message_id));
+      await env.STATE.put('howto_v2', String(r.result.message_id));
+      const old = Number(await env.STATE.get('howto_v1'));
+      if (old) await tg(env, 'deleteMessage', { chat_id: tgChannel(env), message_id: old });
     } else {
-      await env.STATE.put('howto_v1', 'fail');
+      await env.STATE.put('howto_v2', 'fail');
       await say(env, adminChat(env), `Не смог написать в канал: ${esc(r && r.description)}. Дай боту права администратора с публикацией и закреплением.`);
     }
   }
