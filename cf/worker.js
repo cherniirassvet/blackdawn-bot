@@ -484,8 +484,6 @@ async function daRecovered(env) {
    пятнадцатиминутной давности, и на нём «заходы» посыпались бы на ровном месте.
    Панель молчит — тик просто пропускаем, прошлый список не трогаем. */
 async function pollJoins(env) {
-  if (await getJson(env, 'joins_off', 0)) return;
-
   const u8 = await panelBytes(env, SRV + 'zm_online.json');
   if (!u8 || !u8.length) return;
 
@@ -494,6 +492,9 @@ async function pollJoins(env) {
   if (!j || !Array.isArray(j.list)) return;
 
   const humans = j.list.filter((p) => !p.bot);
+  await liveToChannel(env, humans.length).catch(() => {});
+
+  if (await getJson(env, 'joins_off', 0)) return;
 
   /* Ключ — SteamID, если он есть: ник меняется вместе с клановым тегом,
      и по нику один и тот же человек выглядел бы как новый. */
@@ -516,6 +517,105 @@ async function pollJoins(env) {
     + (j.map ? ` \u00B7 карта <code>${esc(j.map)}</code>` : ''));
 
   await say(env, adminChat(env), lines.join('\n'));
+}
+
+/* ------------------------------------------------------------ посты в канал */
+
+const LIVE_MIN = 2;                 // со скольких живых звать в канал
+const LIVE_GAP = 2 * 3600 * 1000;   // не чаще раза в два часа
+
+function addrOf(env) {
+  return `${env.SERVER_IP}:${env.SERVER_PORT}`;
+}
+
+/* Минск всегда UTC+3. */
+function minsk() {
+  const d = new Date(Date.now() + 3 * 3600 * 1000);
+  return { h: d.getUTCHours(), m: d.getUTCMinutes(), wd: d.getUTCDay(), date: d.toISOString().slice(0, 10),
+    day: Math.floor((Date.now() / 1000 + 3 * 3600) / 86400) };
+}
+
+const post = (env, text, extra = {}) => say(env, tgChannel(env), text, extra);
+
+/* Зовём в канал по фронту: было меньше LIVE_MIN живых, стало не меньше. */
+async function liveToChannel(env, n) {
+  const prev = await getJson(env, 'live_prev', 0);
+  if (n === prev) return;
+  await putJson(env, 'live_prev', n);
+  if (n < LIVE_MIN || prev >= LIVE_MIN) return;
+  const last = await getJson(env, 'live_ts', 0);
+  if (Date.now() - last < LIVE_GAP) return;
+  const r = await post(env,
+    `\u{1F525} <b>Сейчас на сервере ${n} ${plural(n, 'живой игрок', 'живых игрока', 'живых игроков')}</b> — заходи, пока жарко!\n\n`
+    + `☣️ <code>${addrOf(env)}</code>\nКонсоль (~) → <code>connect ${addrOf(env)}</code>`);
+  if (r && r.ok) await putJson(env, 'live_ts', Date.now());
+}
+
+const HOWTO = (env) =>
+  '\u{1F9DF} <b>Как зайти на «Чёрный Рассвет» за 2 минуты</b>\n\n'
+  + '1. Запусти Counter-Strike 1.6 на компьютере.\n'
+  + '2. Нажми <b>~</b> (тильда) — откроется консоль.\n'
+  + `3. Введи <code>connect ${addrOf(env)}</code> и нажми Enter.\n\n`
+  + 'Консоль не открывается? Настройки → Клавиатура → Дополнительно → «Включить консоль». '
+  + `Или: Найти серверы → Избранное → Добавить сервер → <code>${addrOf(env)}</code>\n\n`
+  + '\u{1F381} В игре напиши <b>/tg</b>, отправь код боту @zm_cherniirassvet_bot — <b>+500 АП</b>\n'
+  + '\u{1F511} Каждый день в 12:00 здесь <b>код дня</b>: пиши в игре <b>/код 1234</b> — +200 АП\n'
+  + '\u{1F525} Каждый вечер 20:00–21:00 (Минск) — <b>Живой вечер</b>, двойные аммопаки\n'
+  + '\u{1F3C6} По понедельникам топ-3 недели получает 3000 / 2000 / 1000 АП\n\n'
+  + 'Сайт: https://cherniirassvet.github.io/';
+
+async function channelJobs(env) {
+  const t = minsk();
+
+  /* Закреплённый пост «как зайти» — один раз. */
+  if (!(await env.STATE.get('howto_v1'))) {
+    const r = await post(env, HOWTO(env));
+    if (r && r.ok) {
+      await tg(env, 'pinChatMessage', { chat_id: tgChannel(env), message_id: r.result.message_id, disable_notification: true });
+      await env.STATE.put('howto_v1', String(r.result.message_id));
+    } else {
+      await env.STATE.put('howto_v1', 'fail');
+      await say(env, adminChat(env), `Не смог написать в канал: ${esc(r && r.description)}. Дай боту права администратора с публикацией и закреплением.`);
+    }
+  }
+
+  /* Код дня в 12:00. Плагин пишет «номер_дня код». */
+  if (t.h === 12 && !(await env.STATE.get('dc_' + t.date))) {
+    const [day, code] = decodeBytes(await panelBytes(env, SRV + 'zm_daycode.txt')).trim().split(/\s+/);
+    if (Number(day) === t.day && /^\d{4}$/.test(code || '')) {
+      const r = await post(env,
+        `\u{1F511} <b>Код дня: <code>${code}</code></b>\n\nЗайди на сервер и напиши в чат <b>/код ${code}</b> — получишь +200 аммопаков. `
+        + `Код действует до полуночи.\n\n☣️ <code>${addrOf(env)}</code>`);
+      if (r && r.ok) await env.STATE.put('dc_' + t.date, '1', { expirationTtl: 3 * 86400 });
+    }
+  }
+
+  /* Напоминание о Живом вечере. */
+  if (t.h === 19 && t.m >= 30 && !(await env.STATE.get('ev_' + t.date))) {
+    const r = await post(env,
+      '\u{1F525} <b>Через 30 минут — Живой вечер!</b>\n\n20:00–21:00 по Минску двойные аммопаки за урон, убийства и заражения. '
+      + `Собираемся все вместе — с людьми играть веселее, чем с ботами.\n\n☣️ <code>${addrOf(env)}</code>`);
+    if (r && r.ok) await env.STATE.put('ev_' + t.date, '1', { expirationTtl: 3 * 86400 });
+  }
+
+  /* Итоги недели: плагин пишет файл в понедельник, проверяем раз в 10 минут. */
+  if (t.m % 10 === 0) {
+    const lines = decodeBytes(await panelBytes(env, SRV + 'zm_weektop.txt')).split('\n').map((l) => l.trim()).filter(Boolean);
+    const week = Number(lines[0]);
+    if (week && week > (await getJson(env, 'wt_posted', 0))) {
+      const medal = ['\u{1F947}', '\u{1F948}', '\u{1F949}'];
+      const rows = lines.slice(1).map((l) => {
+        const [p, score, prize, ...name] = l.split('|');
+        return `${medal[Number(p) - 1] || p} <b>${esc(name.join('|'))}</b> — ${score} очков, +${fmt(Number(prize))} АП`;
+      });
+      if (rows.length) {
+        const r = await post(env, '\u{1F3C6} <b>Топ недели на «Чёрном Рассвете»</b>\n\n' + rows.join('\n')
+          + '\n\nОчко — за убитого зомби и за заражение. Новая неделя уже идёт: <b>/неделя</b> в игре покажет счёт.'
+          + `\n\n☣️ <code>${addrOf(env)}</code>`);
+        if (r && r.ok) await putJson(env, 'wt_posted', week);
+      }
+    }
+  }
 }
 
 /* ---------------------------------------------------------------- Telegram */
@@ -1335,5 +1435,6 @@ export default {
     /* Заходы считаем отдельной цепочкой: сбой доната не должен их глушить,
        и наоборот. */
     ctx.waitUntil(pollJoins(env).catch(() => {}));
+    ctx.waitUntil(channelJobs(env).catch(() => {}));
   },
 };
